@@ -1,4 +1,5 @@
 package study.spring.batch.springbatchstudy.part3;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.Job;
@@ -6,8 +7,13 @@ import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.item.ItemWriter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Configuration
 @Slf4j
@@ -25,12 +31,27 @@ public class ItemReaderConfiguration {
                 .build();
     }
 
-    private Step customItemReaderStep() {
+    @Bean
+    public Step customItemReaderStep() {
         return stepBuilderFactory.get("customItemReaderStep")
-                .chunk()
-                .reader()
-                .processor()
-                .writer()
+                .<Person, Person>chunk(10)
+                .reader(new CustomItemReader<>(getItems()))
+                .writer(itemWriter())
                 .build();
+    }
+
+    private ItemWriter<? super Person> itemWriter() {
+        return items -> log.info(items.stream().map(Person::getName).collect(Collectors.joining(", ")));
+    }
+
+
+    public List<Person> getItems() {
+        List<Person> items = new ArrayList<>();
+
+        for (int i = 0; i < 10; i++) {
+            items.add(new Person(i + 1, "test name" + i, "test age", "test address"));
+        }
+
+        return items;
     }
 }
