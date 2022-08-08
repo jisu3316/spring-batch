@@ -8,8 +8,12 @@ import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.database.JdbcCursorItemReader;
+import org.springframework.batch.item.database.*;
 import org.springframework.batch.item.database.builder.JdbcCursorItemReaderBuilder;
+import org.springframework.batch.item.database.builder.JdbcPagingItemReaderBuilder;
+import org.springframework.batch.item.database.builder.JpaCursorItemReaderBuilder;
+import org.springframework.batch.item.database.builder.JpaPagingItemReaderBuilder;
+import org.springframework.batch.item.database.support.SqlPagingQueryProviderFactoryBean;
 import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.batch.item.file.mapping.DefaultLineMapper;
@@ -17,10 +21,15 @@ import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.BeanPropertyRowMapper;
 
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Configuration
@@ -31,14 +40,19 @@ public class ItemReaderConfiguration {
     private final JobBuilderFactory jobBuilderFactory;
     private final StepBuilderFactory stepBuilderFactory;
     private final DataSource dataSource;
+    private final EntityManagerFactory entityManagerFactory;
+    private static final int chunkSize = 10;
 
     @Bean
     public Job itemReaderJob() throws Exception {
         return this.jobBuilderFactory.get("itemReaderJob")
                 .incrementer(new RunIdIncrementer())
+                .start(jpaPagingItemReaderStep())
                 .start(this.customItemReaderStep())
                 .next(this.csvFileStep())
-                .next(this.jdbcStep())
+                .next(this.jdbcCursorItemReaderStep())
+                .next(this.jdbcPagingItemReaderStep())
+                .next(this.jpaCursorItemReaderStep())
                 .build();
     }
 
@@ -61,11 +75,58 @@ public class ItemReaderConfiguration {
     }
 
     @Bean
-    public Step jdbcStep() throws Exception {
-        return stepBuilderFactory.get("jdbcStep")
+    public Step jdbcCursorItemReaderStep() throws Exception {
+        return stepBuilderFactory.get("jdbcCursorStep")
                 .<Person, Person>chunk(10)
                 .reader(jdbcCursorItemReader())
                 .writer(itemWriter())
+                .build();
+    }
+
+    @Bean
+    public Step jdbcPagingItemReaderStep() throws Exception {
+        return stepBuilderFactory.get("jdbcPagingStep")
+                .<Person, Person>chunk(10)
+                .reader(jdbcPagingItemReader())
+                .writer(itemWriter())
+                .build();
+    }
+
+
+    @Bean
+    public Step jpaCursorItemReaderStep() throws Exception {
+        return stepBuilderFactory.get("jpaCursorItemReaderStep")
+                .<Person, Person>chunk(10)
+                .reader(this.jpaCursorItemReader())
+                .writer(itemWriter())
+                .build();
+    }
+
+    @Bean
+    public Step jpaPagingItemReaderStep() {
+        return stepBuilderFactory.get("jpaPagingItemReaderStep")
+                .<Person, Person>chunk(chunkSize)
+                .reader(jpaPagingItemReader())
+                .writer(itemWriter())
+                .build();
+    }
+    private JpaCursorItemReader<Person> jpaCursorItemReader() throws Exception {
+        JpaCursorItemReader<Person> itemReader = new JpaCursorItemReaderBuilder<Person>()
+                .name("jpaCursorItemReader")
+                .entityManagerFactory(entityManagerFactory)
+                .queryString("select p from Person p")
+                .build();
+        itemReader.afterPropertiesSet();
+        return itemReader;
+    }
+
+    @Bean
+    public JpaPagingItemReader<Person> jpaPagingItemReader() {
+        return new JpaPagingItemReaderBuilder<Person>()
+                .name("jpaPagingItemReader")
+                .entityManagerFactory(entityManagerFactory)
+                .pageSize(chunkSize)
+                .queryString("select p from Person p WHERE age >= 20")
                 .build();
     }
 
@@ -79,6 +140,40 @@ public class ItemReaderConfiguration {
                 .build();
         itemReader.afterPropertiesSet();
         return itemReader;
+    }
+
+    @Bean
+    public JdbcPagingItemReader<Person> jdbcPagingItemReader() throws Exception {
+        Map<String, Object> parameterValues = new HashMap<>();
+        parameterValues.put("age", 20);
+
+        return new JdbcPagingItemReaderBuilder<Person>()
+                .pageSize(chunkSize)
+                .fetchSize(chunkSize)
+                .dataSource(dataSource)
+                .rowMapper((rs, rowNum) -> new Person(
+                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4)))
+                .queryProvider(createQueryProvider())
+                .parameterValues(parameterValues)
+                .name("jdbcPagingItemReader")
+                .build();
+
+    }
+
+    @Bean
+    public PagingQueryProvider createQueryProvider() throws Exception {
+        SqlPagingQueryProviderFactoryBean queryProvider = new SqlPagingQueryProviderFactoryBean();
+        queryProvider.setDataSource(dataSource); // Database에 맞는 PagingQueryProvider를 선택하기 위해
+        queryProvider.setSelectClause("id, name, age, address");
+        queryProvider.setFromClause("from person");
+        queryProvider.setWhereClause("where age >= :age");
+
+        Map<String, Order> sortKeys = new HashMap<>(1);
+        sortKeys.put("id", Order.ASCENDING);
+
+        queryProvider.setSortKeys(sortKeys);
+
+        return queryProvider.getObject();
     }
 
     private FlatFileItemReader<Person> csvFileItemReader() throws Exception {
